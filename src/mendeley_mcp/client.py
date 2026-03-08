@@ -125,6 +125,30 @@ class Folder:
         )
 
 
+@dataclass
+class FileInfo:
+    """Represents a file attached to a Mendeley document."""
+
+    id: str
+    document_id: str
+    mime_type: str
+    file_name: str
+    size: int
+    filehash: str | None = None
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> FileInfo:
+        """Create a FileInfo from API response data."""
+        return cls(
+            id=data["id"],
+            document_id=data["document_id"],
+            mime_type=data.get("mime_type", "application/octet-stream"),
+            file_name=data.get("file_name", "unknown"),
+            size=data.get("size", 0),
+            filehash=data.get("filehash"),
+        )
+
+
 class MendeleyClient:
     """Async client for the Mendeley API."""
 
@@ -285,39 +309,58 @@ class MendeleyClient:
         )
         return Folder.from_api(response.json())
 
-    async def get_file_content(self, document_id: str) -> bytes | None:
-        """Get the PDF content of a document if available."""
-        # First, get the file info
+    async def list_files(self, document_id: str) -> list[FileInfo]:
+        """List files attached to a document."""
         response = await self._request(
             "GET",
             "/files",
             accept="application/vnd.mendeley-file.1+json",
             params={"document_id": document_id},
         )
-        files = response.json()
+        return [FileInfo.from_api(f) for f in response.json()]
 
-        if not files:
-            return None
-
-        file_id = files[0]["id"]
-
-        # Get the download URL
-        response = await self._request(
-            "GET",
+    async def download_file(self, file_id: str) -> tuple[bytes, str] | None:
+        """Download a file by its ID. Returns (content, filename) or None."""
+        # Request without following redirects so we can capture the Location header
+        headers = self._auth_headers(accept="application/vnd.mendeley-file.1+json")
+        response = await self.client.get(
             f"/files/{file_id}",
-            accept="application/vnd.mendeley-file.1+json",
+            headers=headers,
+            follow_redirects=False,
         )
 
-        # The response contains a redirect URL for download
+        # Handle 401 with token refresh
+        if response.status_code == 401 and self.credentials.refresh_token:
+            await self.refresh_access_token()
+            headers["Authorization"] = f"Bearer {self.credentials.access_token}"
+            response = await self.client.get(
+                f"/files/{file_id}",
+                headers=headers,
+                follow_redirects=False,
+            )
+
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return None
+
         download_url = response.headers.get("Location")
         if not download_url:
             return None
 
-        # Download the actual file
-        async with httpx.AsyncClient() as download_client:
+        # Extract filename from Content-Disposition or fall back
+        filename = f"{file_id}.pdf"
+        ct = response.headers.get("Content-Type", "")
+        if "json" in ct:
+            try:
+                file_info = response.json()
+                filename = file_info.get("file_name", filename)
+            except Exception:
+                pass
+
+        # Download the actual file content
+        async with httpx.AsyncClient(timeout=120.0) as download_client:
             file_response = await download_client.get(download_url)
             file_response.raise_for_status()
-            return file_response.content
+            return file_response.content, filename
 
     async def search_catalog(
         self,

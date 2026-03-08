@@ -7,15 +7,17 @@ documents in your Mendeley reference library.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from .auth import load_credentials
-from .client import Document, MendeleyClient, MendeleyCredentials
+from .client import Document, FileInfo, MendeleyClient, MendeleyCredentials
 
 # Initialize the MCP server
 mcp = FastMCP("mendeley")
@@ -332,6 +334,149 @@ async def mendeley_add_document(
     try:
         doc = await client.add_document(title=title, doc_type=doc_type, **kwargs)
         return json.dumps(format_document(doc), indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def _get_download_dir() -> Path:
+    """Get the download directory for Mendeley files."""
+    env_dir = os.environ.get("MENDELEY_DOWNLOAD_DIR")
+    if env_dir:
+        download_dir = Path(env_dir)
+    else:
+        download_dir = Path.home() / "Downloads" / "mendeley"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    return download_dir
+
+
+def format_file_info(file_info: FileInfo) -> dict[str, Any]:
+    """Format a file info object for output."""
+    return {
+        "id": file_info.id,
+        "document_id": file_info.document_id,
+        "file_name": file_info.file_name,
+        "mime_type": file_info.mime_type,
+        "size": file_info.size,
+        "filehash": file_info.filehash,
+    }
+
+
+@mcp.tool()
+async def mendeley_list_files(
+    document_id: str,
+) -> str:
+    """
+    List files attached to a Mendeley document.
+
+    Args:
+        document_id: The Mendeley document ID
+
+    Returns:
+        JSON array of file metadata (id, file_name, mime_type, size)
+    """
+    client = await get_client()
+
+    try:
+        files = await client.list_files(document_id)
+        results = [format_file_info(f) for f in files]
+        return json.dumps(results, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+async def mendeley_download_file(
+    document_id: str,
+    file_id: str | None = None,
+) -> str:
+    """
+    Download a file attached to a Mendeley document to disk.
+
+    Args:
+        document_id: The Mendeley document ID
+        file_id: Specific file ID to download (optional, downloads first file if omitted).
+                 Use mendeley_list_files to see available files.
+
+    Returns:
+        JSON object with the download path and file details
+    """
+    client = await get_client()
+
+    try:
+        # List files to get metadata (and pick first if no file_id)
+        files = await client.list_files(document_id)
+        if not files:
+            return json.dumps({"error": f"No files attached to document {document_id}"})
+
+        if not file_id:
+            file_id = files[0].id
+            file_name = files[0].file_name
+        else:
+            match = next((f for f in files if f.id == file_id), None)
+            file_name = match.file_name if match else None
+
+        result = await client.download_file(file_id)
+        if result is None:
+            return json.dumps({"error": f"Could not download file {file_id}"})
+
+        content, fallback_name = result
+        filename = file_name or fallback_name
+
+        # Sanitize filename to prevent path traversal
+        safe_name = Path(filename).name  # strips directory components
+        if not safe_name or safe_name.startswith("."):
+            safe_name = f"{file_id}.pdf"
+
+        # Save to disk
+        download_dir = _get_download_dir()
+        safe_prefix = document_id[:8]
+        file_path = (download_dir / f"{safe_prefix}_{safe_name}").resolve()
+
+        # Verify the resolved path is within the download directory
+        if not str(file_path).startswith(str(download_dir.resolve())):
+            return json.dumps({"error": "Invalid filename in server response"})
+
+        file_path.write_bytes(content)
+
+        return json.dumps({
+            "path": str(file_path),
+            "file_name": filename,
+            "size": len(content),
+            "document_id": document_id,
+            "file_id": file_id,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.resource("mendeley://file/{document_id}")
+async def get_document_file(document_id: str) -> str:
+    """
+    Get the primary file content for a document as base64-encoded data.
+
+    This resource exposes document attachments (typically PDFs) for MCP clients
+    that support binary resource content.
+    """
+    client = await get_client()
+
+    try:
+        files = await client.list_files(document_id)
+        if not files:
+            return json.dumps({"error": f"No files attached to document {document_id}"})
+
+        result = await client.download_file(files[0].id)
+        if result is None:
+            return json.dumps({"error": "Could not download file"})
+
+        content, filename = result
+        encoded = base64.b64encode(content).decode("utf-8")
+
+        return json.dumps({
+            "file_name": filename,
+            "mime_type": files[0].mime_type,
+            "size": len(content),
+            "data_base64": encoded,
+        })
     except Exception as e:
         return json.dumps({"error": str(e)})
 
