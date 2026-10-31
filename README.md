@@ -129,6 +129,7 @@ The Mendeley tools should now be available in Claude.
 |------|-------------|
 | `mendeley_search_library` | Search documents in your library |
 | `mendeley_get_document` | Get full details of a specific document |
+| `mendeley_download_pdf` | Save a document's attached PDF to a specified local path |
 | `mendeley_list_documents` | List documents, optionally filtered by folder |
 | `mendeley_list_folders` | List all folders/collections |
 | `mendeley_search_catalog` | Search Mendeley's global paper database |
@@ -141,9 +142,23 @@ Once configured, you can ask Claude things like:
 
 - "Search my Mendeley library for papers about transformer architectures"
 - "What papers do I have in my 'Machine Learning' folder?"
+- "Download the PDF attached to this document to `/tmp/paper.pdf`."
 - "Find the paper with DOI 10.1038/nature14539 and summarize it"
 - "Search the Mendeley catalog for recent papers on protein folding"
 - "Add this paper to my library: [title, authors, etc.]"
+
+### Downloading PDFs
+
+Call `mendeley_download_pdf` with a `document_id` from your library and an
+`output_path` ending in `.pdf`. The destination directory must already exist;
+existing files are never overwritten. The path is on the machine running the
+MCP server (inside the container when using Docker), not necessarily the client
+machine. Relative paths use the server's working directory.
+
+On success, the tool returns `document_id`, the absolute `path`, and `size_bytes`.
+Documents without a PDF attachment, download failures, and filesystem errors
+return an `error` instead. PDF bytes are saved locally, not embedded in the tool
+response.
 
 ## Configuration
 

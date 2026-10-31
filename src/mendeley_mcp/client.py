@@ -197,6 +197,7 @@ class MendeleyClient:
         method: str,
         path: str,
         accept: str = "application/json",
+        allow_redirect: bool = False,
         **kwargs: Any,
     ) -> httpx.Response:
         """Make an authenticated request, refreshing token if needed."""
@@ -212,7 +213,8 @@ class MendeleyClient:
             headers["Authorization"] = f"Bearer {self.credentials.access_token}"
             response = await self.client.request(method, path, headers=headers, **kwargs)
 
-        response.raise_for_status()
+        if not (allow_redirect and response.is_redirect):
+            response.raise_for_status()
         return response
 
     async def search_library(
@@ -296,28 +298,40 @@ class MendeleyClient:
         )
         files = response.json()
 
-        if not files:
+        pdf_files = [
+            file for file in files
+            if file.get("mime_type") == "application/pdf"
+            or (
+                not file.get("mime_type")
+                and file.get("file_name", "").lower().endswith(".pdf")
+            )
+        ]
+        if not pdf_files:
             return None
 
-        file_id = files[0]["id"]
+        file_id = pdf_files[0]["id"]
 
         # Get the download URL
         response = await self._request(
             "GET",
             f"/files/{file_id}",
             accept="application/vnd.mendeley-file.1+json",
+            allow_redirect=True,
         )
 
         # The response contains a redirect URL for download
         download_url = response.headers.get("Location")
         if not download_url:
-            return None
+            raise ValueError("Mendeley did not return a download URL for the PDF.")
 
-        # Download the actual file
-        async with httpx.AsyncClient() as download_client:
+        # Do not forward the Mendeley bearer token to the file storage host.
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as download_client:
             file_response = await download_client.get(download_url)
             file_response.raise_for_status()
-            return file_response.content
+            content = file_response.content
+            if not content.startswith(b"%PDF-"):
+                raise ValueError("The downloaded attachment is not a PDF.")
+            return content
 
     async def search_catalog(
         self,
