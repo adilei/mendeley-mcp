@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 from .auth import load_credentials
@@ -149,6 +151,50 @@ async def mendeley_get_document(
         }
         return json.dumps(result, indent=2)
     except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+async def mendeley_download_pdf(document_id: str, output_path: str) -> str:
+    """
+    Download a document's attached PDF to a local file without overwriting existing files.
+
+    Args:
+        document_id: The Mendeley document ID
+        output_path: Destination .pdf path on the server's machine. The parent directory
+            must exist. Relative paths are relative to the server's working directory.
+
+    Returns:
+        JSON object with document_id, absolute path, and size_bytes, or an error
+    """
+    try:
+        if not document_id.strip() or not output_path.strip():
+            raise ValueError("document_id and output_path must not be empty.")
+        path = Path(output_path).expanduser().absolute()
+        if path.suffix.lower() != ".pdf":
+            raise ValueError("output_path must have a .pdf extension.")
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(f"Destination already exists: {path}")
+        if not path.parent.is_dir():
+            raise FileNotFoundError(f"Destination directory does not exist: {path.parent}")
+
+        client = await get_client()
+        content = await client.get_file_content(document_id)
+        if content is None:
+            raise ValueError("No PDF attachment is available for this document.")
+
+        with path.open("xb") as file:
+            try:
+                file.write(content)
+            except OSError:
+                path.unlink()
+                raise
+        return json.dumps({
+            "document_id": document_id,
+            "path": str(path),
+            "size_bytes": len(content),
+        }, indent=2)
+    except (OSError, ValueError, httpx.HTTPError) as e:
         return json.dumps({"error": str(e)})
 
 
